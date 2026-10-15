@@ -5,24 +5,39 @@
   if(!KEYS.length||!window.fetch)return;
   var API='https://api.github.com',DESC='kaoyan-progress-sync (auto)';
   var T='gsync.token',G='gsync.gist';
-  var LS=window.localStorage,orig=Storage.prototype.setItem,applying=false;
-  var loadedAt=Date.now(),touched=false,pushTimer=null,busy=false,ui=null;
+  var LS=window.localStorage,orig=Storage.prototype.setItem;
+  var loadedAt=Date.now(),touched=false,pushTimer=null,busy=false,again=false,ui=null,SEP='\u0001';
   function get(k){try{return LS.getItem(k);}catch(e){return null;}}
   function rawSet(k,v){try{orig.call(LS,k,v);}catch(e){}}
-  function tsKey(k){return 'gsync.ts.'+k;}
-  function fname(k){return k.replace(/[^\w.-]/g,'_')+'.json';}
+  function jget(k,d){try{var v=JSON.parse(get(k)||'null');return v==null?d:v;}catch(e){return d;}}
   function token(){return get(T);}
-  // 监听本地进度写入 -> 自动上传
+  function fname(k){return k.replace(/[^\w.-]/g,'_')+'.json';}
+  function metaKey(k){return 'gsync.meta.'+k;}
+  function dirtyKey(k){return 'gsync.dirty.'+k;}
+  // 把进度对象拍平成「题目 → 值」，按题目逐条合并
+  function flat(o,pre,out){out=out||{};if(o&&typeof o==='object'&&!Array.isArray(o)){for(var k in o){var p=pre?pre+SEP+k:k,v=o[k];if(v&&typeof v==='object'&&!Array.isArray(v))flat(v,p,out);else out[p]=v;}}return out;}
+  function unflat(f,tpl){var o={},k;if(tpl&&typeof tpl==='object')for(k in tpl)if(tpl[k]&&typeof tpl[k]==='object'&&!Array.isArray(tpl[k]))o[k]={};
+    for(var p in f){var ks=p.split(SEP),c=o;for(var i=0;i<ks.length-1;i++){if(!c[ks[i]]||typeof c[ks[i]]!=='object')c[ks[i]]={};c=c[ks[i]];}c[ks[ks.length-1]]=f[p];}return o;}
+  function same(a,b){return JSON.stringify(a)===JSON.stringify(b);}
+  var base={},tpl={};
+  KEYS.forEach(function(k){var v=jget(k,{});tpl[k]=v;base[k]=flat(v);});
+  // 记录本页的真实改动（勾选/取消），带时间戳写入本地
   Storage.prototype.setItem=function(k,v){
-    orig.call(this,k,v);
-    if(this===LS&&!applying&&KEYS.indexOf(k)>=0){rawSet(tsKey(k),String(Date.now()));schedulePush();}
+    if(this!==LS||KEYS.indexOf(k)<0)return orig.call(this,k,v);
+    var nv;try{nv=JSON.parse(v);}catch(e){return orig.call(this,k,v);}
+    var nf=flat(nv),of=base[k]||{},cur=flat(jget(k,{})),meta=jget(metaKey(k),{}),now=Date.now(),ch=false,p;
+    for(p in nf)if(!(p in of)||!same(nf[p],of[p])){cur[p]=nf[p];meta[p]=now;ch=true;}
+    for(p in of)if(!(p in nf)){delete cur[p];meta[p]=now;ch=true;}
+    base[k]=nf;tpl[k]=nv;
+    orig.call(LS,k,JSON.stringify(unflat(cur,nv)));
+    if(ch){rawSet(metaKey(k),JSON.stringify(meta));rawSet(dirtyKey(k),'1');schedulePush();}
   };
   ['click','keydown','touchstart'].forEach(function(e){document.addEventListener(e,function(){touched=true;},{capture:true,passive:true});});
 
   function gh(method,path,body,keep){
     var o={method:method,cache:'no-store',headers:{'Authorization':'Bearer '+token(),'Accept':'application/vnd.github+json'}};
     if(body){o.body=JSON.stringify(body);o.headers['Content-Type']='application/json';}
-    if(keep)o.keepalive=true;
+    if(keep&&o.body&&o.body.length<60000)o.keepalive=true;
     return fetch(API+path,o).then(function(r){
       if(r.status===401)throw new Error('令牌无效或已过期');
       if(r.status===403||r.status===404)throw new Error('令牌没有 Gist 权限（'+r.status+'）');
@@ -42,55 +57,62 @@
     var p=f.truncated?fetch(f.raw_url,{cache:'no-store'}).then(function(r){return r.text();}):Promise.resolve(f.content);
     return p.then(function(t){try{return JSON.parse(t);}catch(e){return null;}});
   }
-  function merge(a,b){ // 首次连接时合并两台设备的已有进度
-    if(a&&b&&typeof a==='object'&&typeof b==='object'&&!Array.isArray(a)){
-      var o={},k;for(k in a)o[k]=a[k];for(k in b)o[k]=(k in o)?merge(o[k],b[k]):b[k];return o;}
-    if(typeof a==='number'&&typeof b==='number')return Math.max(a,b);
-    if(typeof a==='string'&&typeof b==='string')return a>b?a:b;
-    return b==null?a:b;
+  // 逐题合并：同一题以较新的改动为准；都没有时间记录（旧数据）就取并集
+  function mergeFlat(lf,lm,rf,rm){
+    var out={},meta={},seen={},p,all=[lf,lm,rf,rm];
+    all.forEach(function(o){for(var q in o)seen[q]=1;});
+    for(p in seen){
+      var lt=lm[p]||0,rt=rm[p]||0,useR;
+      if(lt||rt)useR=rt>lt;else useR=!(p in lf);
+      var src=useR?rf:lf;if(p in src)out[p]=src[p];
+      if(lt||rt)meta[p]=Math.max(lt,rt);
+    }
+    return {f:out,m:meta};
   }
-  function localData(k){try{return JSON.parse(get(k)||'null');}catch(e){return null;}}
-  function applyLocal(k,data,ts){applying=true;try{LS.setItem(k,JSON.stringify(data));}catch(e){}applying=false;rawSet(tsKey(k),String(ts));}
-
-  function push(keep){
-    if(!token()||!get(G))return Promise.resolve();
-    var files={};
-    KEYS.forEach(function(k){files[fname(k)]={content:JSON.stringify({ts:+(get(tsKey(k))||Date.now()),data:localData(k)||{}})};});
-    status('busy','上传中…');
-    return gh('PATCH','/gists/'+get(G),{files:files},keep).then(function(){status('ok','已同步 '+hm());}).catch(function(e){status('err',e.message);});
+  function payload(){var files={};KEYS.forEach(function(k){files[fname(k)]={content:JSON.stringify({v:2,data:jget(k,{}),meta:jget(metaKey(k),{})})};});return files;}
+  function quickPush(){ // 页面关闭/切走时尽量把未上传的改动发出去
+    if(!token()||!get(G))return;
+    if(!KEYS.some(function(k){return get(dirtyKey(k))==='1';}))return;
+    clearTimeout(pushTimer);pushTimer=null;
+    gh('PATCH','/gists/'+get(G),{files:payload()},true).then(function(){KEYS.forEach(function(k){LS.removeItem(dirtyKey(k));});}).catch(function(){});
   }
-  function schedulePush(){if(!token())return;status('busy','待上传…');clearTimeout(pushTimer);pushTimer=setTimeout(push,1500);}
-  function flush(){if(pushTimer){clearTimeout(pushTimer);pushTimer=null;push(true);}}
+  function schedulePush(){if(!token())return;status('busy','待上传…');clearTimeout(pushTimer);pushTimer=setTimeout(function(){pushTimer=null;sync();},1500);}
 
+  // 拉取 → 合并 → 写回本地 → 有差异就上传
   function sync(){
-    if(!token()||busy)return Promise.resolve();
-    busy=true;status('busy','同步中…');
-    var changed=false,needPush=false;
-    return findGist().then(function(g){
+    if(!token())return Promise.resolve();
+    if(busy){again=true;return Promise.resolve();}
+    busy=true;again=false;status('busy','同步中…');
+    var changed=false,needPush=false,g0;
+    return findGist().then(function(g){g0=g;
       return Promise.all(KEYS.map(function(k){
         return readRemote(g,k).then(function(r){
-          var lt=+(get(tsKey(k))||0),ld=localData(k),linked=get('gsync.linked.'+k)==='1';
-          if(!r||!r.data){needPush=true;}
-          else if(!linked){
-            var m=ld?merge(ld,r.data):r.data;
-            if(JSON.stringify(m)!==JSON.stringify(ld)){applyLocal(k,m,Date.now());changed=true;}
-            if(JSON.stringify(m)!==JSON.stringify(r.data))needPush=true;
+          var lf=flat(jget(k,{})),lm=jget(metaKey(k),{});
+          var rf=r&&r.data?flat(r.data):{},rm=r&&r.meta?r.meta:{};
+          var m=mergeFlat(lf,lm,rf,rm);
+          if(!same(m.f,lf)||!same(m.m,lm)){
+            if(!same(m.f,lf))changed=true;
+            rawSet(k,JSON.stringify(unflat(m.f,tpl[k])));rawSet(metaKey(k),JSON.stringify(m.m));
           }
-          else if((r.ts||0)>lt){if(JSON.stringify(r.data)!==JSON.stringify(ld)){applyLocal(k,r.data,r.ts);changed=true;}else rawSet(tsKey(k),String(r.ts));}
-          else if(lt>(r.ts||0)&&JSON.stringify(r.data)!==JSON.stringify(ld))needPush=true;
-          rawSet('gsync.linked.'+k,'1');
+          if(!r||!same(m.f,rf)||!same(m.m,rm))needPush=true;
         });
       }));
-    }).then(function(){return needPush?push():status('ok','已同步 '+hm());})
-    .then(function(){
-      busy=false;
+    }).then(function(){
+      if(!needPush)return;
+      status('busy','上传中…');
+      return gh('PATCH','/gists/'+get(G),{files:payload()});
+    }).then(function(){
+      KEYS.forEach(function(k){LS.removeItem(dirtyKey(k));});
+      busy=false;status('ok','已同步 '+hm());
       if(changed){
-        if(!touched||Date.now()-loadedAt<4000)location.reload();
-        else status('new','云端有新进度，点我刷新');
+        if(!touched||Date.now()-loadedAt<4000)return location.reload();
+        status('new','有其他设备的新进度，点我刷新');
       }
+      if(again)sync();
     }).catch(function(e){busy=false;status('err',e.message);});
   }
   function hm(){var d=new Date();return ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2);}
+  function wake(){if(!token())return;loadedAt=Date.now();touched=false;sync();}
 
   // ---- 界面 ----
   var st={s:'off',t:'未开启跨设备同步'};
@@ -124,12 +146,12 @@
     function close(){mask.remove();}
     if(on){
       btn('断开同步',false,function(){if(confirm('断开后本设备不再同步（本地进度保留，云端数据保留）。确定？')){LS.removeItem(T);LS.removeItem(G);status('off','未开启跨设备同步');close();}});
-      btn('立即同步',false,function(){close();sync();});
+      btn('立即同步',false,function(){close();wake();});
     }
     btn('关闭',false,close);
     btn(on?'保存新令牌':'开启同步',true,function(){
       var v=inp.value.trim();if(!v){if(on){close();}else inp.focus();return;}
-      rawSet(T,v);LS.removeItem(G);close();loadedAt=Date.now();touched=false;sync();
+      rawSet(T,v);LS.removeItem(G);close();wake();
     });
     box.appendChild(row);mask.appendChild(box);
     mask.addEventListener('click',function(e){if(e.target===mask)close();});
@@ -138,11 +160,11 @@
   function start(){
     buildUI();
     if(token())sync();
-    document.addEventListener('visibilitychange',function(){
-      if(document.visibilityState==='hidden')flush();
-      else if(token()){loadedAt=Date.now();touched=false;sync();}
-    });
-    window.addEventListener('pagehide',flush);
+    document.addEventListener('visibilitychange',function(){if(document.visibilityState==='hidden')quickPush();else wake();});
+    window.addEventListener('focus',wake);
+    window.addEventListener('online',wake);
+    window.addEventListener('pagehide',quickPush);
+    setInterval(function(){if(document.visibilityState==='visible'&&token()&&!busy)sync();},60000);
   }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start);else start();
 })();
