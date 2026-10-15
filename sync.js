@@ -109,7 +109,7 @@
         status('new','有其他设备的新进度，点我刷新');
       }
       if(again)sync();
-    }).catch(function(e){busy=false;status('err',e.message);});
+    }).catch(function(e){busy=false;var net=e instanceof TypeError||/load failed|failed to fetch|networkerror/i.test(e.message);status('err',net?'连不上 GitHub（网络问题），本地进度已保存，每分钟自动重试':e.message);});
   }
   function hm(){var d=new Date();return ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2);}
   function wake(){if(!token())return;loadedAt=Date.now();touched=false;sync();}
