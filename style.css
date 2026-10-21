@@ -95,3 +95,14 @@ details.ans>summary{cursor:pointer;color:var(--brand);font-size:14px;width:max-c
 }
 
 .ico{display:inline-block;width:14px;height:10px;margin-right:6px;vertical-align:0;background:linear-gradient(currentColor 0 0) 0 0/100% 2px no-repeat,linear-gradient(currentColor 0 0) 0 50%/100% 2px no-repeat,linear-gradient(currentColor 0 0) 0 100%/100% 2px no-repeat}
+/* 已做/待做 + 屏蔽已掌握 */
+.bar,.bigbar{position:relative}
+.bar .bar-done,.bigbar .bar-done{position:absolute;left:0;top:0;bottom:0;width:0;height:auto;background:var(--brand);opacity:.28;transition:width .3s}
+.bar-fill,.bigbar span[data-all-bar]{position:relative}
+.hm-toggle{display:inline-flex;align-items:center;gap:5px;border:1px dashed var(--mute);border-radius:999px;padding:4px 12px;font-size:13px;cursor:pointer;color:var(--ink);background:var(--card);user-select:none;white-space:nowrap}
+.hm-toggle input{margin:0;accent-color:var(--ok)}
+.hm-toggle:has(input:checked){border-style:solid;border-color:var(--ok);background:var(--ok-soft);color:var(--ok);font-weight:600}
+.chip.donemark input{accent-color:var(--brand)}
+.chip.donemark:has(input:disabled){cursor:default;opacity:.75}
+.toolbar .stat b{color:var(--ink);font-weight:600}
+.pstat{display:none}@media (max-width:900px){.pstat{display:block;font-size:13px;color:var(--mute);margin:-6px 0 14px}.pstat b{color:var(--ink)}.toolbar .stat{display:none}}
